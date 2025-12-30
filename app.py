@@ -1,17 +1,53 @@
 import streamlit as st
+import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Dict, List, Tuple
+import re
+
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+
 KPI_FILE = "KPI_loyalty_metrics_full_ru.xlsx"
 
-GREEN_ACCENT = "#2E8B57"          # основной акцент
-NOTE_BG = "rgba(46, 139, 87, 0.08)"  # фон плашек
-BAR_COLOR = "rgba(46, 139, 87, 0.18)" # цвет столбиков
+GREEN_ACCENT = "rgb(46, 139, 87)"
+BAR_COLOR = "rgba(46, 139, 87, 0.28)"
 
+BAR_COLOR_2 = "rgba(59, 130, 246, 0.24)"
+LINE_COLOR_2 = "rgb(37, 99, 235)"
+
+# -------------------- Форматирование чисел (RU) --------------------
+
+def fmt_int_ru(x) -> str:
+    """
+    Целые числа с пробелами: 112726 -> '112 726'
+    """
+    try:
+        return f"{int(round(float(x))):,}".replace(",", " ")
+    except Exception:
+        return "—"
+
+
+def fmt_money_ru(x) -> str:
+    """
+    Деньги: 74501199 -> '74 501 199 ₽'
+    """
+    try:
+        return f"{int(round(float(x))):,}".replace(",", " ") + " ₽"
+    except Exception:
+        return "—"
+
+
+def fmt_pct_ru(x, decimals: int = 1) -> str:
+    """
+    Проценты: 51.63 -> '51,6 %'
+    """
+    try:
+        return f"{float(x):.{decimals}f}".replace(".", ",") + " %"
+    except Exception:
+        return "—"
 
 
 # -------------------- THEME --------------------
@@ -227,104 +263,347 @@ def load_kpi_table(path: str) -> pd.DataFrame:
 @st.cache_data
 def build_demo_report() -> pd.DataFrame:
     """
-    Демо-данные 6 месяцев (2025-07..2025-12) с “событием” в 2025-10:
-    запуск игровой механики => рост активных и повторных.
-    Все расчёты согласованы.
+    Демо-данные на 6 месяцев (2025-07 .. 2025-12) со связями:
+    - Общие продажи -> продажи ПЛ (доля) -> транзакции ПЛ -> чек/частота -> повторка
+    - База/статусы
+    - Бонусы: начислено/списано/сгорело/остаток + доли
+    - Уровни A/B/C: выручка/скидка/структура
+    - ПГ/Цели + индексы
+
+    События:
+    - 2025-10: запуск игровой механики
+    - 2025-11: дедлайн/акция на списание
     """
-    months = pd.date_range("2025-07-01", periods=6, freq="MS")
-    mtxt = [d.strftime("%Y-%m") for d in months]
 
-    total_sales = [520_000_000, 535_000_000, 550_000_000, 560_000_000, 590_000_000, 605_000_000]
-    loyalty_sales = [138_000_000, 145_000_000, 152_000_000, 160_000_000, 178_000_000, 186_000_000]
+    rng = np.random.default_rng(7)
+    months = pd.period_range("2025-07", "2025-12", freq="M").astype(str)
 
-    loyalty_tx = [430_000, 445_000, 460_000, 480_000, 525_000, 545_000]
-    unique_members_tx = [285_000, 292_000, 298_000, 318_000, 350_000, 360_000]  # рост с октября
+    # --- БАЗА: общие продажи (₽) ---
+    total_sales = np.array([132e6, 128e6, 136e6, 141e6, 138e6, 146e6], dtype=float)
+    total_sales *= rng.normal(1.0, 0.012, size=6)
 
-    loyalty_db_total = [1_180_000, 1_195_000, 1_210_000, 1_230_000, 1_250_000, 1_270_000]
-    active_members = [275_000, 282_000, 288_000, 310_000, 345_000, 352_000]      # рост с октября
+    # --- ДОЛЯ ПЛ в продажах (40–60%), до событий ---
+    loyalty_share = np.array([0.47, 0.46, 0.48, 0.49, 0.49, 0.50], dtype=float)
+    loyalty_share += rng.normal(0.0, 0.004, size=6)
 
-    # повторные покупатели (из уникальных покупавших)
-    repeaters = [82_000, 85_000, 87_000, 98_000, 125_000, 130_000]
+    # --- Повторка (в долях), до событий ---
+    repeat_rate = np.array([0.33, 0.32, 0.34, 0.345, 0.345, 0.35], dtype=float)
+    repeat_rate += rng.normal(0.0, 0.008, size=6)
 
-    avg_basket_non_member = [1_180, 1_190, 1_200, 1_205, 1_215, 1_220]
+    # --- Активные участники (чел), до событий ---
+    active_members = np.array([98000, 96000, 100000, 103000, 104000, 106000], dtype=float)
+    active_members *= rng.normal(1.0, 0.012, size=6)
+
+    # --- Событие 1: октябрь — запуск игровой механики ---
+    i_oct = list(months).index("2025-10")
+    # эффект: +8% активных в октябре, +5% в ноябре, +6% в декабре (устойчивый, но не фантастический)
+    active_members[i_oct:] *= np.array([1.08, 1.05, 1.06], dtype=float)
+
+    # доля ПЛ: +2 п.п. в окт, +1 п.п. в ноя, +1.5 п.п. в дек
+    loyalty_share[i_oct:] += np.array([0.020, 0.010, 0.015], dtype=float)
+
+    # повторка: +2.5 п.п. в окт, +1.5 п.п. в ноя, +2 п.п. в дек (в долях)
+    repeat_rate[i_oct:] += np.array([0.025, 0.015, 0.020], dtype=float)
+
+    # --- Событие 2: ноябрь — “дедлайн/акция на списание бонусов” ---
+    i_nov = list(months).index("2025-11")
+    loyalty_share[i_nov] += 0.005  # чуть выше доля ПЛ в ноябре
+
+    # клипуем в реалистичные рамки
+    loyalty_share = np.clip(loyalty_share, 0.40, 0.60)
+    repeat_rate = np.clip(repeat_rate, 0.20, 0.55)
+    active_members = np.clip(active_members, 70000, 180000).round().astype(int)
+
+    loyalty_sales = (total_sales * loyalty_share).round().astype(int)
+
+    # --- Средние чеки ---
+    avg_basket_member = np.array([3850, 3780, 3920, 3980, 4050, 4180], dtype=float)
+    avg_basket_member *= rng.normal(1.0, 0.01, size=6)
+
+    avg_basket_non_member = avg_basket_member * rng.normal(0.88, 0.01, size=6)
+
+    # --- Транзакции ПЛ согласуем с sales и avg basket ---
+    loyalty_transactions = (loyalty_sales / avg_basket_member).round().astype(int)
+
+    # --- Частота ---
+    avg_freq_member = loyalty_transactions / np.maximum(active_members, 1)
+    avg_freq_non_member = avg_freq_member * rng.normal(0.72, 0.03, size=6)
+
+    # --- База участников и статусы ---
+    db_total = np.array([510000, 515000, 522000, 532000, 538000, 545000], dtype=int)
+
+    new_members = np.array([12000, 11500, 14000, 16000, 15000, 17000], dtype=int)
+    lost_members = np.array([6500, 7000, 6800, 7200, 7100, 7400], dtype=int)
+    reactivated_members = np.array([7200, 6900, 7600, 8800, 8300, 9100], dtype=int)
+
+    inactive_members = (db_total - active_members).astype(int)
+
+    # --- Бонусы (1 бонус = 1 ₽ условно) ---
+    points_issued = (loyalty_sales * 0.02).round().astype(int)  # ~2% от продаж ПЛ
+    redemption_rate = np.clip(rng.normal(0.62, 0.04, size=6), 0.45, 0.80)
+
+    # игровой запуск слегка повышает вовлечённость в списание
+    redemption_rate[i_oct:] += np.array([0.03, 0.02, 0.02], dtype=float)
+
+    # ноябрьский дедлайн даёт разовый всплеск списаний
+    redemption_rate[i_nov] += 0.08
+    redemption_rate = np.clip(redemption_rate, 0.45, 0.85)
+
+    points_redeemed = (points_issued * redemption_rate).round().astype(int)
+
+    expiration_rate = np.clip(rng.normal(0.05, 0.012, size=6), 0.01, 0.10)
+    points_expired = (points_issued * expiration_rate).round().astype(int)
+
+    total_active_points = []
+    balance = 18_000_000
+    for i in range(6):
+        balance = balance + int(points_issued[i]) - int(points_redeemed[i]) - int(points_expired[i])
+        total_active_points.append(max(balance, 0))
+    total_active_points = np.array(total_active_points, dtype=int)
+
+    # --- Уровни (A/B/C) ---
+    tier_share_members = np.array([0.15, 0.35, 0.50])  # A, B, C
+    tier_members_A = (db_total * tier_share_members[0]).round().astype(int)
+    tier_members_B = (db_total * tier_share_members[1]).round().astype(int)
+    tier_members_C = (db_total * tier_share_members[2]).round().astype(int)
+
+    tier_share_revenue = np.array([0.52, 0.30, 0.18])  # A, B, C
+    rev_A = (loyalty_sales * tier_share_revenue[0]).round().astype(int)
+    rev_B = (loyalty_sales * tier_share_revenue[1]).round().astype(int)
+    rev_C = (loyalty_sales * tier_share_revenue[2]).round().astype(int)
+
+    disc_A = np.array([5, 5, 5, 6, 6, 6], dtype=int)
+    disc_B = np.array([3, 3, 3, 3, 4, 4], dtype=int)
+    disc_C = np.array([1, 1, 1, 1, 1, 2], dtype=int)
+
+    # --- Прошлый год и цели (для индексов) ---
+    last_year_loyalty_sales = (loyalty_sales / rng.normal(1.06, 0.01, size=6)).round().astype(int)
+    last_year_loyalty_tx = (loyalty_transactions / rng.normal(1.04, 0.01, size=6)).round().astype(int)
+    last_year_avg_basket_member = (avg_basket_member / rng.normal(1.03, 0.01, size=6)).round(2)
+    last_year_avg_freq_member = (avg_freq_member / rng.normal(1.02, 0.01, size=6))
+    last_year_repeat_rate = np.clip(repeat_rate - rng.normal(0.015, 0.004, size=6), 0.15, 0.55)
+    last_year_db_total = (db_total / rng.normal(1.04, 0.005, size=6)).round().astype(int)
+
+    target_loyalty_sales = (loyalty_sales * rng.normal(1.03, 0.01, size=6)).round().astype(int)
+    target_loyalty_tx = (loyalty_transactions * rng.normal(1.02, 0.01, size=6)).round().astype(int)
+    target_avg_basket_member = (avg_basket_member * rng.normal(1.01, 0.005, size=6)).round(2)
+    target_avg_freq_member = (avg_freq_member * rng.normal(1.01, 0.005, size=6))
+    target_repeat_rate = np.clip(repeat_rate + rng.normal(0.01, 0.004, size=6), 0.20, 0.60)
+    target_db_total = (db_total * rng.normal(1.02, 0.005, size=6)).round().astype(int)
+
+    # Индексы как отклонение в % (дельта): +3.2% / -1.1%
+    idx_sales_vs_ly = (loyalty_sales / last_year_loyalty_sales - 1) * 100
+    idx_sales_vs_target = (loyalty_sales / target_loyalty_sales - 1) * 100
+
+    idx_tx_vs_ly = (loyalty_transactions / last_year_loyalty_tx - 1) * 100
+    idx_tx_vs_target = (loyalty_transactions / target_loyalty_tx - 1) * 100
+
+    idx_db_vs_ly = (db_total / last_year_db_total - 1) * 100
+    idx_db_vs_target = (db_total / target_db_total - 1) * 100
+
 
     df = pd.DataFrame({
-        "Месяц": mtxt,
-        "Общие продажи, ₽": total_sales,
-        "Продажи участников ПЛ, ₽": loyalty_sales,
-        "Транзакции участников ПЛ, шт": loyalty_tx,
-        "Уникальные покупатели ПЛ, чел": unique_members_tx,
-        "База ПЛ, всего, чел": loyalty_db_total,
+        "Месяц": months,
+
+        # Продажи
+        "Общие продажи, ₽": total_sales.round().astype(int),
+        "Продажи по ПЛ, ₽": loyalty_sales.round().astype(int),
+        "Доля ПЛ в общих продажах, %": loyalty_share * 100,
+        "Покупки участников ПЛ, шт": loyalty_transactions,
         "Активные участники, чел": active_members,
-        "Покупатели с ≥2 покупками, чел": repeaters,
-        "Средний чек не участника, ₽": avg_basket_non_member,
+        "Средний чек участника, ₽": avg_basket_member.round(2),
+        "Средний чек не-участника, ₽": avg_basket_non_member.round(2),
+        "Средняя частота покупок участника, раз": avg_freq_member,
+        "Доля повторных покупок, %": repeat_rate * 100,
+
+        # Индексы/сравнения
+        "Индекс продаж ПЛ к прошлому году, %": idx_sales_vs_ly,
+        "Индекс продаж ПЛ к цели, %": idx_sales_vs_target,
+        "Индекс покупок ПЛ к прошлому году, %": idx_tx_vs_ly,
+        "Индекс покупок ПЛ к цели, %": idx_tx_vs_target,
+
+        # База
+        "Размер базы участников ПЛ, чел": db_total,
+        "Индекс базы к прошлому году, %": idx_db_vs_ly,
+        "Индекс базы к цели, %": idx_db_vs_target,
+        "Новые участники, чел": new_members,
+        "Неактивные участники, чел": inactive_members,
+        "Потерянные участники, чел": lost_members,
+        "Реактивированные участники, чел": reactivated_members,
+
+        # Бонусы
+        "Начисленные бонусы, шт": points_issued,
+        "Списанные бонусы, шт": points_redeemed,
+        "Сгоревшие бонусы, шт": points_expired,
+        "Активные бонусы, шт": total_active_points,
+        "Доля списания бонусов, %": (points_redeemed / np.maximum(points_issued, 1) * 100),
+        "Доля сгорания бонусов, %": (points_expired / np.maximum(points_issued, 1) * 100),
+
+        # Уровни
+        "Выручка уровня A, ₽": rev_A,
+        "Выручка уровня B, ₽": rev_B,
+        "Выручка уровня C, ₽": rev_C,
+        "Скидка уровня A, %": disc_A,
+        "Скидка уровня B, %": disc_B,
+        "Скидка уровня C, %": disc_C,
+        "Участники уровня A, чел": tier_members_A,
+        "Участники уровня B, чел": tier_members_B,
+        "Участники уровня C, чел": tier_members_C,
+
+        # Прошлый год
+        "ПГ: Продажи по ПЛ, ₽": last_year_loyalty_sales,
+        "ПГ: Покупки участников ПЛ, шт": last_year_loyalty_tx,
+        "ПГ: Средний чек участника, ₽": last_year_avg_basket_member,
+        "ПГ: Средняя частота покупок, раз": last_year_avg_freq_member,
+        "ПГ: Доля повторных покупок, %": last_year_repeat_rate * 100,
+        "ПГ: Размер базы участников ПЛ, чел": last_year_db_total,
+
+        # Цели
+        "Цель: Продажи по ПЛ, ₽": target_loyalty_sales,
+        "Цель: Покупки участников ПЛ, шт": target_loyalty_tx,
+        "Цель: Средний чек участника, ₽": target_avg_basket_member,
+        "Цель: Средняя частота покупок, раз": target_avg_freq_member,
+        "Цель: Доля повторных покупок, %": target_repeat_rate * 100,
+        "Цель: Размер базы участников ПЛ, чел": target_db_total,
     })
-
-    # производные показатели (точно)
-    df["Доля ПЛ в общих продажах, %"] = df["Продажи участников ПЛ, ₽"] / df["Общие продажи, ₽"] * 100.0
-    df["Средний чек участника, ₽"] = df["Продажи участников ПЛ, ₽"] / df["Транзакции участников ПЛ, шт"]
-    df["Частота покупок участника"] = df["Транзакции участников ПЛ, шт"] / df["Уникальные покупатели ПЛ, чел"]
-    df["Доля повторных покупок, %"] = df["Покупатели с ≥2 покупками, чел"] / df["Уникальные покупатели ПЛ, чел"] * 100.0
-    df["Доля активных в базе, %"] = df["Активные участники, чел"] / df["База ПЛ, всего, чел"] * 100.0
-
-    # сравнение с не участниками
-    df["Средний чек: разница с не участником, ₽"] = df["Средний чек участника, ₽"] - df["Средний чек не участника, ₽"]
-
     return df
 
-
 def build_report_matrix(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Таблица “перевёрнута”: колонки — месяцы, строки — показатели.
-    Числа отформатированы: пробелы в тысячах, проценты с запятой.
-    """
     months = df["Месяц"].tolist()
+    
+    # ---- форматирование ----
+    def fmt_int(x):
+        if pd.isna(x): return "–"
+        return f"{int(round(float(x))):,}".replace(",", " ")
 
-    rows: List[Tuple[str, str, List, str]] = []
+    def fmt_money(x):
+        if pd.isna(x): return "–"
+        return f"{int(round(float(x))):,}".replace(",", " ") + " ₽"
 
-    # Продажи
-    rows.append(("Продажи", "Продажи участников ПЛ", df["Продажи участников ПЛ, ₽"].tolist(), "money"))
-    rows.append(("Продажи", "Доля ПЛ в общих продажах", df["Доля ПЛ в общих продажах, %"].tolist(), "pct"))
-    rows.append(("Продажи", "Транзакции участников ПЛ", df["Транзакции участников ПЛ, шт"].tolist(), "int"))
-    rows.append(("Продажи", "Уникальные покупатели ПЛ", df["Уникальные покупатели ПЛ, чел"].tolist(), "int"))
-    rows.append(("Продажи", "Средний чек участника", df["Средний чек участника, ₽"].tolist(), "money"))
-    rows.append(("Продажи", "Средний чек: разница с не участником", df["Средний чек: разница с не участником, ₽"].tolist(), "money"))
-    rows.append(("Продажи", "Частота покупок участника", df["Частота покупок участника"].tolist(), "num2"))
-    rows.append(("Продажи", "Доля повторных покупок", df["Доля повторных покупок, %"].tolist(), "pct"))
+    def fmt_pct(x):
+        if pd.isna(x): return "–"
+        return f"{float(x):.1f} %".replace(".", ",")
 
-    # База
-    rows.append(("База участников", "База ПЛ, всего", df["База ПЛ, всего, чел"].tolist(), "int"))
-    rows.append(("База участников", "Активные участники", df["Активные участники, чел"].tolist(), "int"))
-    rows.append(("База участников", "Доля активных в базе", df["Доля активных в базе, %"].tolist(), "pct"))
+    def fmt_idx_delta(x):
+        if pd.isna(x): return "–"
+        return f"{float(x):+.1f} %".replace(".", ",")
 
-    idx = pd.MultiIndex.from_tuples([(b, n) for b, n, _, _ in rows], names=["Блок", "Показатель"])
-    mat = pd.DataFrame(index=idx, columns=months)
+    def fmt_float(x):
+        if pd.isna(x): return "–"
+        return f"{float(x):.2f}".replace(".", ",")
 
-    fmt_map: Dict[Tuple[str, str], str] = {}
+    # ---- структура отчёта + units ----
+    REPORT = {
+        "Продажи": [
+            ("Продажи по программе лояльности", "₽"),
+            ("Индекс к прошлому году (продажи ПЛ)", "%"),
+            ("Индекс к цели (продажи ПЛ)", "%"),
+            ("Доля ПЛ в общих продажах", "%"),
+            ("Покупки участников ПЛ", "шт"),
+            ("Индекс к прошлому году (покупки ПЛ)", "%"),
+            ("Индекс к цели (покупки ПЛ)", "%"),
+            ("Количество активных участников", "чел"),
+            ("Средний чек участника", "₽"),
+            ("Средний чек не-участника", "₽"),
+            ("Средняя частота покупок участника", "раз"),
+            ("Доля повторных покупок", "%"),
+        ],
+        "База участников": [
+            ("Размер базы участников ПЛ", "чел"),
+            ("Индекс к прошлому году (база)", "%"),
+            ("Индекс к цели (база)", "%"),
+            ("Новые участники", "чел"),
+            ("Активные участники", "чел"),
+            ("Неактивные участники", "чел"),
+            ("Потерянные участники", "чел"),
+            ("Реактивированные участники", "чел"),
+        ],
+        "Бонусная валюта": [
+            ("Начисленные бонусы", "шт"),
+            ("Списанные бонусы", "шт"),
+            ("Сгоревшие бонусы", "шт"),
+            ("Активные бонусы", "шт"),
+            ("Доля списания бонусов", "%"),
+            ("Доля сгорания бонусов", "%"),
+        ],
+        "Уровни программы": [
+            ("Выручка уровня A", "₽"),
+            ("Выручка уровня B", "₽"),
+            ("Выручка уровня C", "₽"),
+            ("Скидка уровня A", "%"),
+            ("Скидка уровня B", "%"),
+            ("Скидка уровня C", "%"),
+            ("Участники уровня A", "чел"),
+            ("Участники уровня B", "чел"),
+            ("Участники уровня C", "чел"),
+        ],
+        "Дополнительные данные": [
+            ("Общие продажи", "₽"),
+        ],
+    }
 
-    for b, n, values, fmt in rows:
-        mat.loc[(b, n), :] = values
-        fmt_map[(b, n)] = fmt
+    # ---- маппинг: (блок, показатель) -> (колонка df, formatter) ----
+    MAP = {
+        ("Продажи", "Продажи по программе лояльности"): ("Продажи по ПЛ, ₽", fmt_money),
+        ("Продажи", "Индекс к прошлому году (продажи ПЛ)"): ("Индекс продаж ПЛ к прошлому году, %", fmt_idx_delta),
+        ("Продажи", "Индекс к цели (продажи ПЛ)"): ("Индекс продаж ПЛ к цели, %", fmt_idx_delta),
+        ("Продажи", "Доля ПЛ в общих продажах"): ("Доля ПЛ в общих продажах, %", fmt_pct),
+        ("Продажи", "Покупки участников ПЛ"): ("Покупки участников ПЛ, шт", fmt_int),
+        ("Продажи", "Индекс к прошлому году (покупки ПЛ)"): ("Индекс покупок ПЛ к прошлому году, %", fmt_idx_delta),
+        ("Продажи", "Индекс к цели (покупки ПЛ)"): ("Индекс покупок ПЛ к цели, %", fmt_idx_delta),
+        ("Продажи", "Количество активных участников"): ("Активные участники, чел", fmt_int),
+        ("Продажи", "Средний чек участника"): ("Средний чек участника, ₽", fmt_money),
+        ("Продажи", "Средний чек не-участника"): ("Средний чек не-участника, ₽", fmt_money),
+        ("Продажи", "Средняя частота покупок участника"): ("Средняя частота покупок участника, раз", fmt_float),
+        ("Продажи", "Доля повторных покупок"): ("Доля повторных покупок, %", fmt_pct),
 
-    out = mat.copy()
-    for (b, n), fmt in fmt_map.items():
-        vals = out.loc[(b, n), :].tolist()
-        formatted = []
-        for v in vals:
-            if fmt == "money":
-                formatted.append(fmt_money(v))
-            elif fmt == "int":
-                formatted.append(fmt_int(v))
-            elif fmt == "pct":
-                formatted.append(fmt_pct_ru(v, digits=1))
-            elif fmt == "num2":
-                if v is None or (isinstance(v, float) and pd.isna(v)):
-                    formatted.append("—")
-                else:
-                    formatted.append(f"{float(v):.2f}".replace(".", ","))
-            else:
-                formatted.append(str(v))
-        out.loc[(b, n), :] = formatted
+        ("База участников", "Размер базы участников ПЛ"): ("Размер базы участников ПЛ, чел", fmt_int),
+        ("База участников", "Индекс к прошлому году (база)"): ("Индекс базы к прошлому году, %", fmt_idx_delta),
+        ("База участников", "Индекс к цели (база)"): ("Индекс базы к цели, %", fmt_idx_delta),
+        ("База участников", "Новые участники"): ("Новые участники, чел", fmt_int),
+        ("База участников", "Активные участники"): ("Активные участники, чел", fmt_int),
+        ("База участников", "Неактивные участники"): ("Неактивные участники, чел", fmt_int),
+        ("База участников", "Потерянные участники"): ("Потерянные участники, чел", fmt_int),
+        ("База участников", "Реактивированные участники"): ("Реактивированные участники, чел", fmt_int),
+
+        ("Бонусная валюта", "Начисленные бонусы"): ("Начисленные бонусы, шт", fmt_int),
+        ("Бонусная валюта", "Списанные бонусы"): ("Списанные бонусы, шт", fmt_int),
+        ("Бонусная валюта", "Сгоревшие бонусы"): ("Сгоревшие бонусы, шт", fmt_int),
+        ("Бонусная валюта", "Активные бонусы"): ("Активные бонусы, шт", fmt_int),
+        ("Бонусная валюта", "Доля списания бонусов"): ("Доля списания бонусов, %", fmt_pct),
+        ("Бонусная валюта", "Доля сгорания бонусов"): ("Доля сгорания бонусов, %", fmt_pct),
+
+        ("Уровни программы", "Выручка уровня A"): ("Выручка уровня A, ₽", fmt_money),
+        ("Уровни программы", "Выручка уровня B"): ("Выручка уровня B, ₽", fmt_money),
+        ("Уровни программы", "Выручка уровня C"): ("Выручка уровня C, ₽", fmt_money),
+        ("Уровни программы", "Скидка уровня A"): ("Скидка уровня A, %", fmt_pct),
+        ("Уровни программы", "Скидка уровня B"): ("Скидка уровня B, %", fmt_pct),
+        ("Уровни программы", "Скидка уровня C"): ("Скидка уровня C, %", fmt_pct),
+        ("Уровни программы", "Участники уровня A"): ("Участники уровня A, чел", fmt_int),
+        ("Уровни программы", "Участники уровня B"): ("Участники уровня B, чел", fmt_int),
+        ("Уровни программы", "Участники уровня C"): ("Участники уровня C, чел", fmt_int),
+
+        ("Дополнительные данные", "Общие продажи"): ("Общие продажи, ₽", fmt_money),
+    }
+
+    # ---- строим матрицу “из структуры” ----
+    rows = []
+    for block, metric_list in REPORT.items():
+        for metric, unit in metric_list:
+            row = {"Блок": block, "Показатель": metric, "Ед.": unit}
+            for m in months:
+                row[m] = "–"
+            rows.append(row)
+
+    out = pd.DataFrame(rows).set_index(["Блок", "Показатель"])
+
+    df_i = df.set_index("Месяц")
+
+    for (block, metric), (col, formatter) in MAP.items():
+        if col not in df_i.columns:
+            continue
+        series = df_i[col].reindex(months)
+        out.loc[(block, metric), months] = [formatter(v) for v in series.values]
 
     return out
 
@@ -332,123 +611,177 @@ def build_report_matrix(df: pd.DataFrame) -> pd.DataFrame:
 # -------------------- UI --------------------
 tabs = st.tabs(["Пример отчёта", "Метрики"])
 
-
-# ===== TAB 1: METRICS =====
 with tabs[1]:
-    kpi_path = Path(KPI_FILE)
-    if not kpi_path.exists():
+    st.subheader("Справочник KPI программы лояльности")
+
+    # --- читаем справочник из Excel ---
+    from pathlib import Path
+
+    BASE_DIR = Path(__file__).parent
+    KPI_FILE = BASE_DIR / "KPI_loyalty_metrics_full_ru.xlsx"
+
+    df_metrics = pd.read_excel(KPI_FILE, sheet_name="Sheet1")
+
+    # --- приводим имена колонок к аккуратному виду (убираем пробелы) ---
+    df_metrics.columns = [str(c).strip() for c in df_metrics.columns]
+
+    required_cols = ["KPI", "Категория", "Описание", "Формула", "Рекомендации"]
+    missing = [c for c in required_cols if c not in df_metrics.columns]
+    if missing:
         st.error(
-            f"Не найден файл '{KPI_FILE}' рядом с app.py.\n\n"
-            f"Положи '{KPI_FILE}' в папку проекта: {Path('.').resolve()}"
+            "В файле Excel не найдены нужные колонки: "
+            + ", ".join(missing)
+            + ". Проверь названия столбцов на листе Sheet1."
         )
-    else:
-        kpi_df = load_kpi_table(str(kpi_path))
-        with st.container(border=True):
-            c1, c2 = st.columns([1.2, 3.0])
-            with c1:
-                categories = ["Все категории"] + sorted([c for c in kpi_df["Категория"].unique().tolist() if c])
-                selected_cat = st.selectbox("Категория", categories, index=0)
-            with c2:
-                query = st.text_input("Поиск", value="", placeholder="Например: выручка, активные, баллы, уровни…").strip().lower()
+        st.stop()
 
-        
-        df = kpi_df.copy()
-        if selected_cat != "Все категории":
-            df = df[df["Категория"] == selected_cat]
+    # --- поиск + фильтр по категории ---
+    col_a, col_b = st.columns([2, 1])
+    with col_a:
+        q = st.text_input("Поиск по KPI / описанию / формуле", value="")
+    with col_b:
+        categories = ["Все"] + sorted(
+            [x for x in df_metrics["Категория"].dropna().astype(str).unique().tolist() if x.strip() != ""]
+        )
+        cat = st.selectbox("Категория", categories, index=0)
 
-        if query:
-            hay = (
-                df["KPI"].astype(str).str.lower()
-                + " " + df["Описание"].astype(str).str.lower()
-                + " " + df["Формула"].astype(str).str.lower()
-                + " " + df["Рекомендации"].astype(str).str.lower()
-            )
-            df = df[hay.str.contains(query, na=False)]
+    view = df_metrics.copy()
 
-        df = df.reset_index(drop=True)
-        if df.empty:
-          st.warning("По выбранным условиям ничего не найдено.")
-        else:
-          show = df.copy()
+    if cat != "Все":
+        view = view[view["Категория"].astype(str).str.strip() == cat]
 
-    # короткие заголовки, чтобы меньше распирало по ширине
-    show = show.rename(columns={
-        "Категория": "Кат.",
-        "Описание": "Зачем смотреть",
-    })
+    if q.strip():
+        q_low = q.strip().lower()
+        mask = (
+            view["KPI"].astype(str).str.lower().str.contains(q_low, na=False)
+            | view["Описание"].astype(str).str.lower().str.contains(q_low, na=False)
+            | view["Формула"].astype(str).str.lower().str.contains(q_low, na=False)
+            | view["Рекомендации"].astype(str).str.lower().str.contains(q_low, na=False)
+        )
+        view = view[mask]
 
-    # порядок колонок
-    show = show[["Кат.", "KPI", "Зачем смотреть", "Формула", "Рекомендации"]]
+    # --- рекомендации: превращаем ячейку в буллиты ---
+    def bullets_from_cell(cell) -> str:
+        if pd.isna(cell):
+            return "—"
+        s = str(cell).strip()
+        if s == "" or s in {"-", "–", "—"}:
+            return "—"
 
-    st.dataframe(
-        show,
-        use_container_width=True,
-        height=780,     # чтобы помещалось по вертикали и скроллилось внутри
-        hide_index=True,
+        # нормализуем разделители:
+        # - строки -> пункты
+        # - "•" -> пункты
+        # - ";" тоже часто используют
+        s = s.replace("\r\n", "\n").replace("\r", "\n")
+        s = s.replace("•", "\n").replace(";", "\n")
+
+        items = []
+        for line in s.split("\n"):
+            t = line.strip()
+            if not t:
+                continue
+            # убираем лидирующие маркеры вроде "- " / "— " / "• "
+            t = t.lstrip("-").lstrip("—").lstrip("–").strip()
+            if t:
+                items.append(t)
+
+        if not items:
+            return "—"
+
+        return "<ul>" + "".join(f"<li>{i}</li>" for i in items) + "</ul>"
+
+    view = view.copy()
+    view["Рекомендации"] = view["Рекомендации"].apply(bullets_from_cell)
+
+    # --- порядок и названия колонок для отображения ---
+    view = view[["KPI", "Категория", "Описание", "Формула", "Рекомендации"]].rename(
+        columns={
+            "KPI": "KPI",
+            "Категория": "Категория",
+            "Описание": "Зачем смотреть",
+            "Формула": "Формула",
+            "Рекомендации": "Рекомендации",
+        }
     )
 
+    # --- компактный HTML-рендер (CSS класс report-table у тебя уже есть) ---
+    html = view.to_html(index=False, escape=False)
+
+    st.markdown(
+        f"<div class='report-table'>{html}</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # ===== TAB 2: REPORT =====
 with tabs[0]:
+    st.subheader("")
+
     df = build_demo_report()
+
+    # ---- 5 ключевых KPI (оставляем как было по смыслу) ----
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    # KPI (как в первой версии: крупно, на верхней панели; без слов в скобках)
-    st.subheader("Ключевые KPI")
+    # доля активных в базе считаем на лету (без отдельной колонки)
+    base_last = max(1, float(last["Размер базы участников ПЛ, чел"]))
+    base_prev = max(1, float(prev["Размер базы участников ПЛ, чел"]))
+    active_share_last = 100 * float(last["Активные участники, чел"]) / base_last
+    active_share_prev = 100 * float(prev["Активные участники, чел"]) / base_prev
 
-    kpi_cols = st.columns(5)
+    c1, c2, c3, c4, c5 = st.columns(5)
 
-    def delta_pct(curr, prv):
-        if prv == 0 or pd.isna(prv) or pd.isna(curr):
-            return "н/д"
-        d = (curr / prv - 1.0) * 100.0
-        sign = "+" if d >= 0 else ""
-        return f"{sign}{d:.1f}%".replace(".", ",")
-
-    # 1) Продажи ПЛ
-    kpi_cols[0].metric(
-        "Продажи участников ПЛ, ₽",
-        fmt_money(last["Продажи участников ПЛ, ₽"]),
-        delta=delta_pct(last["Продажи участников ПЛ, ₽"], prev["Продажи участников ПЛ, ₽"]),
-    )
-    # 2) Доля ПЛ в продажах
-    kpi_cols[1].metric(
-        "Доля ПЛ в общих продажах, %",
-        fmt_pct_ru(last["Доля ПЛ в общих продажах, %"], 1),
-        delta=delta_pct(last["Доля ПЛ в общих продажах, %"], prev["Доля ПЛ в общих продажах, %"]),
-    )
-    # 3) Активные участники
-    kpi_cols[2].metric(
-        "Активные участники, чел",
-        fmt_int(last["Активные участники, чел"]),
-        delta=delta_pct(last["Активные участники, чел"], prev["Активные участники, чел"]),
-    )
-    # 4) Доля активных
-    kpi_cols[3].metric(
-        "Доля активных в базе, %",
-        fmt_pct_ru(last["Доля активных в базе, %"], 1),
-        delta=delta_pct(last["Доля активных в базе, %"], prev["Доля активных в базе, %"]),
-    )
-    # 5) Доля повторных
-    kpi_cols[4].metric(
-        "Доля повторных покупок, %",
-        fmt_pct_ru(last["Доля повторных покупок, %"], 1),
-        delta=delta_pct(last["Доля повторных покупок, %"], prev["Доля повторных покупок, %"]),
-    )
-
-    st.markdown("---")
+    with c1:
+        st.metric(
+            "Продажи по ПЛ, ₽",
+            fmt_int_ru(last["Продажи по ПЛ, ₽"]) + " ₽",
+            fmt_pct_ru(100 * (last["Продажи по ПЛ, ₽"] / prev["Продажи по ПЛ, ₽"] - 1), 1),
+        )
+    with c2:
+        st.metric(
+            "Доля ПЛ в общих продажах, %",
+            fmt_pct_ru(last["Доля ПЛ в общих продажах, %"], 1),
+            fmt_pct_ru(last["Доля ПЛ в общих продажах, %"] - prev["Доля ПЛ в общих продажах, %"], 1),
+        )
+    with c3:
+        st.metric(
+            "Активные участники, чел",
+            fmt_int_ru(last["Активные участники, чел"]),
+            fmt_pct_ru(100 * (last["Активные участники, чел"] / prev["Активные участники, чел"] - 1), 1),
+        )
+    with c4:
+        st.metric(
+            "Доля активных в базе, %",
+            fmt_pct_ru(active_share_last, 1),
+            fmt_pct_ru(active_share_last - active_share_prev, 1),
+        )
+    with c5:
+        st.metric(
+            "Доля повторных покупок, %",
+            fmt_pct_ru(last["Доля повторных покупок, %"], 1),
+            fmt_pct_ru(last["Доля повторных покупок, %"] - prev["Доля повторных покупок, %"], 1),
+        )
 
 
 # ===================== CHART 1 ============================
+    # вертикальный отступ между графиками
+    st.markdown("<div style='height:40px'></div>", unsafe_allow_html=True)
+
     fig_sales = make_subplots(specs=[[{"secondary_y": True}]])
 
+    # единые имена колонок (чтобы не ломалось)
+    COL = {
+        "month": "Месяц",
+        "sales": "Продажи по ПЛ, ₽",
+        "share": "Доля ПЛ в общих продажах, %",
+    }
+
+    # столбцы — продажи по ПЛ
     fig_sales.add_trace(
         go.Bar(
-            x=df["Месяц"],
-            y=df["Продажи участников ПЛ, ₽"],
-            name="Продажи участников ПЛ, ₽",
+            x=df[COL["month"]],
+            y=df[COL["sales"]],
+            name="Продажи по ПЛ, ₽",
             marker=dict(
                 color=BAR_COLOR,
                 line=dict(color="rgba(46, 139, 87, 0.30)", width=1),
@@ -457,10 +790,11 @@ with tabs[0]:
         secondary_y=False,
     )
 
+    # линия — доля ПЛ в общих продажах
     fig_sales.add_trace(
         go.Scatter(
-            x=df["Месяц"],
-            y=df["Доля ПЛ в общих продажах, %"],
+            x=df[COL["month"]],
+            y=df[COL["share"]],
             name="Доля ПЛ в общих продажах, %",
             mode="lines+markers",
             line=dict(color=GREEN_ACCENT, width=2),
@@ -469,12 +803,11 @@ with tabs[0]:
     )
 
     fig_sales.update_layout(
-        yaxis=dict(showgrid=True),
         template="plotly_white",
         height=420,
         margin=dict(l=20, r=20, t=40, b=20),
         title=dict(
-            text=("Динамика продаж участников ПЛ"),
+            text="Динамика продаж участников ПЛ",
             x=0,
             xanchor="left",
             font=dict(size=18),
@@ -486,49 +819,65 @@ with tabs[0]:
             y=0.96,
             xanchor="left",
             x=0,
-            
         ),
     )
 
+    # левая ось — деньги, с сеткой
     fig_sales.update_yaxes(
         title_text="Продажи, ₽",
         secondary_y=False,
         showgrid=True,
-        gridcolor="rgba(0,0,0,0.16)", 
+        gridcolor="rgba(0,0,0,0.16)",
         gridwidth=1.2,
-        zeroline=False)
-    
-    fig_sales.update_yaxes(title_text="Доля ПЛ, %", secondary_y=True, showgrid=False)
+        zeroline=False,
+    )
+
+    # правая ось — проценты, без сетки
+    fig_sales.update_yaxes(
+        title_text="Доля ПЛ, %",
+        secondary_y=True,
+        showgrid=False,
+        zeroline=False,
+    )
 
     st.plotly_chart(fig_sales, use_container_width=True)
 
-# вертикальный отступ между графиками
-    st.markdown("<div style='height:30px'></div>", unsafe_allow_html=True)
+    # вертикальный отступ между графиками
+    st.markdown("<div style='height:40px'></div>", unsafe_allow_html=True)
 
-# ===================== CHART 2 ============================
-    BAR_COLOR_2 = "rgba(59, 130, 246, 0.28)"  # другой зелёный для столбиков 2-го графика
+
+    # ===================== CHART 2 ============================
+    BAR_COLOR_2 = "rgba(59, 130, 246, 0.28)"  # отдельный цвет для столбиков 2-го графика
+    LINE_COLOR_2 = "rgb(37, 99, 235)"         # линия 2-го графика
 
     fig_quality = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # единые имена колонок (чтобы не ломалось)
+    COL2 = {
+        "month": "Месяц",
+        "active": "Активные участники, чел",
+        "repeat": "Доля повторных покупок, %",
+    }
 
     # столбики: активные участники (левая ось)
     fig_quality.add_trace(
         go.Bar(
-            x=df["Месяц"],
-            y=df["Активные участники, чел"],
+            x=df[COL2["month"]],
+            y=df[COL2["active"]],
             name="Активные участники, чел",
-            marker=dict(color="rgba(59, 130, 246, 0.28)"),
-            ),
+            marker=dict(color=BAR_COLOR_2),
+        ),
         secondary_y=False,
     )
 
     # линия: доля повторных покупок (правая ось)
     fig_quality.add_trace(
         go.Scatter(
-            x=df["Месяц"],
-            y=df["Доля повторных покупок, %"],
+            x=df[COL2["month"]],
+            y=df[COL2["repeat"]],
             name="Доля повторных покупок, %",
             mode="lines+markers",
-            line=dict(color="rgb(37, 99, 235)", width=2),
+            line=dict(color=LINE_COLOR_2, width=2),
         ),
         secondary_y=True,
     )
@@ -573,52 +922,59 @@ with tabs[0]:
 
     st.plotly_chart(fig_quality, use_container_width=True)
 
-
-
-# ===================== COMMENTS ===========================
-    # Комментарии — 2 смысловых абзаца, без зелёного фона
+    # ===================== COMMENTS ===========================
     st.markdown(
         """
-<div class="note">
-<b>Комментарий.</b> После запуска игровой механики в октябре (2025-10) в демо-данных виден рост активности. Параллельно растёт доля повторных покупок — это сигнал, что сценарии онбординга и мотивации на 2-ю покупку стали работать лучше.
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+    <div class="note"> <b>Комментарий.</b> Во втором полугодии вклад
+    программы лояльности в выручку растёт: увеличиваются продажи по ПЛ и
+    её доля в общих продажах, а после запуска игровой механики также
+    видно расширение активности и рост доли повторных покупок. В
+    совокупности это указывает на усиление вовлечения участников и
+    снижение доли разовых покупателей, однако для подтверждения
+    эффекта необходима дополнительная оценка эффекта через замеры с контрольной группой.
+
+    </div>
+    """,
+            unsafe_allow_html=True,
+        )
 
     st.markdown(
-        """
-<div class="note">
-<b>Рекомендации.</b> Зафиксируй гипотезу эффектов через контроль (когорта/регион/holdout) и проверь экономику стимулов: рост активности должен окупаться. Дальше усили 2-ю покупку — триггерами и миссиями для новых участников, и отдельной веткой для тех, кто застрял на 1-й транзакции.
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+            """
+    <div class="note"> <b>Рекомендации.</b>Зафиксировать влияние
+    программы лояльности через сравнение с контрольными группами или
+    периодами без активных механик. Проверить, какие механики ПЛ (миссии,
+    уровни, бонусы) дают вклад в повторную покупку и средний чек, и
+    скорректировать правила начисления под фактическую отдачу. Далее усилить сценарии для стимулирования второй покупки
+    и удержания клиентов: отдельные триггеры для новых участников и механики
+    активации для тех, кто с 1-й покупкой. </div> """,
+            unsafe_allow_html=True,
+        )
 
     st.markdown("---")
-    st.subheader("Таблица")
+
+    # ---- Таблица исходных значений — только здесь ----
+    st.subheader("Данные")
 
     matrix = build_report_matrix(df)
-
     from streamlit import column_config
 
-    # ширины: "Показатель" шире, месяцы одинаковые
+        # ширины: "Показатель" шире, месяцы одинаковые
     month_columns = {
         col: column_config.TextColumn(label=col, width="small")
         for col in matrix.columns
     }
     month_columns = {
         "Показатель": column_config.TextColumn(label="Показатель", width="medium"),
-        **month_columns,
+            **month_columns,
     }
 
-    # выводим по блокам, чтобы не было горизонтального скролла
+     # выводим по блокам, чтобы не было горизонтального скролла
     blocks = matrix.index.get_level_values(0).unique().tolist()
 
     for b in blocks:
         st.markdown(f"**{b}**")
 
-        # превращаем "Показатель" в колонку (чтобы не терялся при hide_index=True)
+    # превращаем "Показатель" в колонку (чтобы не терялся при hide_index=True)
         sub = matrix.loc[b].copy().reset_index()
         sub = sub.rename(columns={sub.columns[0]: "Показатель"})
 
@@ -629,6 +985,8 @@ with tabs[0]:
             hide_index=True,
             disabled=True,
             column_config=month_columns,
-        )
+    )
 
-        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+
